@@ -17,18 +17,26 @@ class Config:
     reddit_client_id: str
     reddit_client_secret: str
     reddit_user_agent: str
-    supabase_url: str
-    supabase_service_role_key: str
+    reddit_username: str | None
+    reddit_password: str | None
+    reddit_refresh_token: str | None
+    supabase_url: str | None
+    supabase_service_role_key: str | None
 
     @staticmethod
-    def from_env() -> "Config":
+    def from_env(*, require_supabase: bool = True) -> "Config":
         return Config(
             subreddit=os.getenv("SUBREDDIT", "churningmarketplace"),
             reddit_client_id=_require_env("REDDIT_CLIENT_ID"),
             reddit_client_secret=_require_env("REDDIT_CLIENT_SECRET"),
             reddit_user_agent=os.getenv("REDDIT_USER_AGENT", "odyssey-scraper/1.0"),
-            supabase_url=_require_env("SUPABASE_URL"),
-            supabase_service_role_key=_require_env("SUPABASE_SERVICE_ROLE_KEY"),
+            reddit_username=os.getenv("REDDIT_USERNAME"),
+            reddit_password=os.getenv("REDDIT_PASSWORD"),
+            reddit_refresh_token=os.getenv("REDDIT_REFRESH_TOKEN"),
+            supabase_url=_require_env("SUPABASE_URL") if require_supabase else os.getenv("SUPABASE_URL"),
+            supabase_service_role_key=_require_env("SUPABASE_SERVICE_ROLE_KEY")
+            if require_supabase
+            else os.getenv("SUPABASE_SERVICE_ROLE_KEY"),
         )
 
 

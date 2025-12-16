@@ -12,6 +12,7 @@ from .util import utc_now
 COMMENTS_TABLE = "odyssey_comments"
 VERSIONS_TABLE = "odyssey_comment_versions"
 LOGS_TABLE = "odyssey_logs"
+WRITE_BATCH_SIZE = 200
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,8 @@ class ExistingVersion:
 
 
 def build_supabase(config: Config) -> Client:
+    if not config.supabase_url or not config.supabase_service_role_key:
+        raise RuntimeError("Missing Supabase environment variables (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY)")
     return create_client(config.supabase_url, config.supabase_service_role_key)
 
 
@@ -100,6 +103,33 @@ def fetch_versions_by_id(sb: Client, version_ids: list[str]) -> dict[str, Existi
     return out
 
 
+def fetch_latest_versions_for_comments(sb: Client, comment_ids: list[str]) -> dict[str, ExistingVersion]:
+    """
+    Fetch the latest version row per comment using is_latest=true.
+    This is used to make runs resilient if odyssey_comments.latest_version_id is temporarily null.
+    """
+    out: dict[str, ExistingVersion] = {}
+    if not comment_ids:
+        return out
+
+    for batch in chunked(comment_ids, 500):
+        resp = (
+            sb.table(VERSIONS_TABLE)
+            .select("version_id,comment_id,body_text")
+            .eq("is_latest", True)
+            .in_("comment_id", batch)
+            .execute()
+        )
+        for row in resp.data or []:
+            cid = str(row["comment_id"])
+            out[cid] = ExistingVersion(
+                version_id=str(row["version_id"]),
+                comment_id=cid,
+                body_text=str(row.get("body_text") or ""),
+            )
+    return out
+
+
 def upsert_comments_metadata(sb: Client, rows: list[dict[str, Any]]) -> None:
     """
     Upsert metadata only. We intentionally do NOT include latest_version_id here,
@@ -107,7 +137,9 @@ def upsert_comments_metadata(sb: Client, rows: list[dict[str, Any]]) -> None:
     """
     if not rows:
         return
-    sb.table(COMMENTS_TABLE).upsert(rows, on_conflict="comment_id").execute()
+    # Avoid PostgREST payload limits by chunking.
+    for i in range(0, len(rows), WRITE_BATCH_SIZE):
+        sb.table(COMMENTS_TABLE).upsert(rows[i : i + WRITE_BATCH_SIZE], on_conflict="comment_id").execute()
 
 
 def insert_versions(sb: Client, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -116,8 +148,12 @@ def insert_versions(sb: Client, rows: list[dict[str, Any]]) -> list[dict[str, An
     """
     if not rows:
         return []
-    resp = sb.table(VERSIONS_TABLE).insert(rows).execute()
-    return resp.data or []
+    inserted: list[dict[str, Any]] = []
+    # Avoid PostgREST payload limits by chunking.
+    for i in range(0, len(rows), WRITE_BATCH_SIZE):
+        resp = sb.table(VERSIONS_TABLE).insert(rows[i : i + WRITE_BATCH_SIZE]).execute()
+        inserted.extend(resp.data or [])
+    return inserted
 
 
 def mark_versions_not_latest(sb: Client, version_ids: list[str]) -> None:
@@ -133,12 +169,24 @@ def update_comments_latest_version(sb: Client, updates: list[dict[str, Any]]) ->
     """
     if not updates:
         return
-    # Supabase/PostgREST doesn't support bulk update by multiple PKs in one call;
-    # we do individual updates (still fine for this subreddit size).
-    for u in updates:
-        sb.table(COMMENTS_TABLE).update(
-            {"latest_version_id": u["latest_version_id"], "last_seen_utc": utc_now().isoformat()}
-        ).eq("comment_id", u["comment_id"]).execute()
+    # Bulk upsert is much faster than per-row updates and avoids 10k+ API calls.
+    now_iso = utc_now().isoformat()
+    rows = [
+        {"comment_id": u["comment_id"], "latest_version_id": u["latest_version_id"], "last_seen_utc": now_iso}
+        for u in updates
+    ]
+    for i in range(0, len(rows), WRITE_BATCH_SIZE):
+        batch = rows[i : i + WRITE_BATCH_SIZE]
+        try:
+            sb.table(COMMENTS_TABLE).upsert(batch, on_conflict="comment_id").execute()
+        except Exception:
+            # If the comments table is missing rows (e.g. partial prior runs), an upsert can
+            # attempt an insert and fail due to NOT NULL constraints. Fall back to per-row updates
+            # for this batch to avoid inserts.
+            for row in batch:
+                sb.table(COMMENTS_TABLE).update(
+                    {"latest_version_id": row["latest_version_id"], "last_seen_utc": now_iso}
+                ).eq("comment_id", row["comment_id"]).execute()
 
 
 def update_comments_deleted_flag(sb: Client, comment_ids: list[str], is_deleted: bool) -> None:

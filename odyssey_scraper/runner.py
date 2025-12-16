@@ -8,6 +8,7 @@ from .supabase_store import (
     ExistingComment,
     build_supabase,
     fetch_existing_comments,
+    fetch_latest_versions_for_comments,
     fetch_versions_by_id,
     insert_log,
     insert_versions,
@@ -25,37 +26,59 @@ class RunResult:
     number_of_comments_processed: int
 
 
-def run_scrape(*, config, run_type: str) -> RunResult:
+def run_scrape(*, config, run_type: str, dry_run: bool = False, thread_limit: int | None = None) -> RunResult:
     processed = 0
 
     try:
         reddit = build_reddit(config)
-        sb = build_supabase(config)
 
         threads = fetch_all_threads(reddit, config.subreddit)
+        if thread_limit is not None:
+            threads = threads[: max(0, int(thread_limit))]
 
         scraped: list[ScrapedComment] = []
-        for submission in threads:
-            scraped.extend(fetch_thread_comments(submission))
+        for i, submission in enumerate(threads, start=1):
+            title = getattr(submission, "title", "") or ""
+            print(f"Scanning thread {i}/{len(threads)}: t3_{submission.id} {title[:80]}")
+            thread_comments = fetch_thread_comments(submission)
+            print(f"  fetched_comments={len(thread_comments)}")
+            scraped.extend(thread_comments)
 
         processed = len(scraped)
 
+        if dry_run:
+            # No database writes; just validate scraping.
+            unique_threads = len({c.thread_id for c in scraped})
+            unique_comments = len({c.comment_id for c in scraped})
+            print(f"[DRY RUN] threads_found={len(threads)} threads_with_comments={unique_threads} comments_found={unique_comments}")
+            return RunResult(status="success", error_message=None, number_of_comments_processed=processed)
+
+        sb = build_supabase(config)
+
         # 1) Load existing comments + their latest version bodies
+        print(f"Writing to Supabase: comments={len(scraped)}", flush=True)
         comment_ids = [c.comment_id for c in scraped]
         existing_map = fetch_existing_comments(sb, comment_ids)
 
-        latest_version_ids = [
-            e.latest_version_id for e in existing_map.values() if e.latest_version_id is not None
-        ]
-        versions_by_id = fetch_versions_by_id(sb, [v for v in latest_version_ids if v is not None])
-
-        latest_body_by_comment: dict[str, str] = {}
+        latest_version_id_by_comment: dict[str, str] = {}
+        # Primary source: odyssey_comments.latest_version_id
         for e in existing_map.values():
-            if not e.latest_version_id:
-                continue
-            v = versions_by_id.get(e.latest_version_id)
+            if e.latest_version_id:
+                latest_version_id_by_comment[e.comment_id] = e.latest_version_id
+
+        # Fallback source: odyssey_comment_versions where is_latest=true (handles partial runs)
+        missing_ptr_ids = [cid for cid, e in existing_map.items() if not e.latest_version_id]
+        if missing_ptr_ids:
+            latest_rows = fetch_latest_versions_for_comments(sb, missing_ptr_ids)
+            for cid, v in latest_rows.items():
+                latest_version_id_by_comment[cid] = v.version_id
+
+        versions_by_id = fetch_versions_by_id(sb, list(set(latest_version_id_by_comment.values())))
+        latest_body_by_comment: dict[str, str] = {}
+        for cid, vid in latest_version_id_by_comment.items():
+            v = versions_by_id.get(vid)
             if v:
-                latest_body_by_comment[e.comment_id] = v.body_text
+                latest_body_by_comment[cid] = v.body_text
 
         # 2) Upsert comment metadata (no version writes yet)
         now_iso = utc_now().isoformat()
@@ -85,9 +108,10 @@ def run_scrape(*, config, run_type: str) -> RunResult:
 
         for c in scraped:
             e: ExistingComment | None = existing_map.get(c.comment_id)
+            effective_latest_vid = latest_version_id_by_comment.get(c.comment_id)
 
             # New comment: always create first version (even if already deleted)
-            if e is None or e.latest_version_id is None:
+            if e is None or effective_latest_vid is None:
                 to_insert_versions.append(
                     {
                         "comment_id": c.comment_id,
@@ -119,8 +143,8 @@ def run_scrape(*, config, run_type: str) -> RunResult:
                 continue
 
             if c.body_text != latest_body:
-                if e.latest_version_id:
-                    to_demote_version_ids.append(e.latest_version_id)
+                if effective_latest_vid:
+                    to_demote_version_ids.append(effective_latest_vid)
                 to_insert_versions.append(
                     {
                         "comment_id": c.comment_id,
@@ -132,10 +156,12 @@ def run_scrape(*, config, run_type: str) -> RunResult:
                 )
 
         # 4) Apply version changes
+        print(f"Updating versions: demote={len(to_demote_version_ids)} insert={len(to_insert_versions)}", flush=True)
         mark_versions_not_latest(sb, to_demote_version_ids)
         inserted = insert_versions(sb, to_insert_versions)
 
         # 5) Update latest_version_id pointers
+        print(f"Updating latest_version_id pointers: {len(inserted)}", flush=True)
         latest_updates = [
             {"comment_id": row["comment_id"], "latest_version_id": row["version_id"]} for row in inserted
         ]
@@ -153,14 +179,15 @@ def run_scrape(*, config, run_type: str) -> RunResult:
         err = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
         try:
             # If we can't even build the Supabase client, logging will fail too.
-            sb = build_supabase(config)
-            insert_log(
-                sb,
-                run_type=run_type,
-                status="failure",
-                error_message=err[:8000],
-                number_of_comments_processed=processed,
-            )
+            if not dry_run:
+                sb = build_supabase(config)
+                insert_log(
+                    sb,
+                    run_type=run_type,
+                    status="failure",
+                    error_message=err[:8000],
+                    number_of_comments_processed=processed,
+                )
         except Exception:
             # If logging also fails, we still want the process to exit with failure.
             pass

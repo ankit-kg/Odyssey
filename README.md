@@ -31,6 +31,8 @@ Create `.env` (or set in Porter). If you want a template, copy `env.example` to 
   - `REDDIT_CLIENT_ID`
   - `REDDIT_CLIENT_SECRET`
   - `REDDIT_USER_AGENT` (recommended, e.g. `odyssey-scraper/1.0 by u/yourname`)
+  - `REDDIT_REFRESH_TOKEN` (recommended for private subreddits / 2FA accounts)
+  - `REDDIT_USERNAME` / `REDDIT_PASSWORD` (optional fallback if refresh token not set)
 
 - **Supabase**
   - `SUPABASE_URL`
@@ -49,6 +51,19 @@ cp env.example .env
 python -m odyssey_scraper --run-type initial
 python -m odyssey_scraper --run-type scheduled
 ```
+
+## Getting access to private subreddits (recommended: refresh token)
+
+If the subreddit is private (403) or you see `invalid_grant`, generate a refresh token using OAuth:
+
+1) In Reddit App preferences, create a **web app** and set **redirect URI** to `http://localhost:8080/callback`
+2) Then run:
+
+```bash
+python -m odyssey_scraper.oauth_helper
+```
+
+Copy the printed token into your `.env` as `REDDIT_REFRESH_TOKEN`.
 
 ## Porter / Cron
 

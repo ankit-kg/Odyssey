@@ -41,12 +41,22 @@ class ScrapedComment:
 
 
 def build_reddit(config: Config) -> praw.Reddit:
-    return praw.Reddit(
+    kwargs = dict(
         client_id=config.reddit_client_id,
         client_secret=config.reddit_client_secret,
         user_agent=config.reddit_user_agent,
         check_for_async=False,
+        # Avoid hanging forever on slow network calls.
+        requestor_kwargs={"timeout": 30},
     )
+    # If the subreddit is private, Reddit will return 403 unless we authenticate as a user
+    # who has access. Prefer refresh tokens (works with 2FA); fall back to password grant.
+    if config.reddit_refresh_token:
+        kwargs["refresh_token"] = config.reddit_refresh_token
+    elif config.reddit_username and config.reddit_password:
+        kwargs["username"] = config.reddit_username
+        kwargs["password"] = config.reddit_password
+    return praw.Reddit(**kwargs)
 
 
 def _normalize_fullname(fullname: str) -> tuple[str, str]:
@@ -89,8 +99,18 @@ def fetch_thread_comments(submission: praw.models.Submission) -> list[ScrapedCom
     """
 
     def do_fetch() -> list[ScrapedComment]:
-        # Force refresh of submission data/comments
-        submission.comments.replace_more(limit=None)
+        # Fully expand the comment tree. On large threads this can take a long time,
+        # so we do it in chunks and print progress to avoid appearing "stuck".
+        api_requests = 0
+        while True:
+            remaining = submission.comments.replace_more(limit=50, threshold=0)
+            api_requests += 50
+            if not remaining:
+                break
+            print(
+                f"    expanding_morecomments: remaining_batches≈{len(remaining)} api_requests_so_far≈{api_requests}",
+                flush=True,
+            )
         all_comments = submission.comments.list()
 
         out: list[ScrapedComment] = []
@@ -163,12 +183,17 @@ def _praw_guard(fn: Any):
     """
     try:
         return fn()
-    except prawcore.exceptions.RateLimitExceeded as e:
+    except prawcore.exceptions.TooManyRequests as e:
         # Required: treat rate limits as failures, but allow a single retry.
-        # We sleep the suggested duration before bubbling to the retry wrapper.
+        # If Reddit tells us how long to wait, honor it.
         import time
 
-        time.sleep(getattr(e, "sleep_time", 1) or 1)
+        retry_after = None
+        try:
+            retry_after = int(e.response.headers.get("retry-after"))  # type: ignore[union-attr]
+        except Exception:
+            retry_after = None
+        time.sleep(retry_after or 2)
         raise
     except (prawcore.exceptions.PrawcoreException, Exception):
         raise

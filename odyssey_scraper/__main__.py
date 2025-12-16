@@ -14,10 +14,19 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(description="Odyssey Reddit comment scraper → Supabase")
     parser.add_argument("--run-type", choices=["initial", "scheduled"], required=True)
+    parser.add_argument("--dry-run", action="store_true", help="Scrape Reddit but do not write to Supabase")
+    parser.add_argument(
+        "--thread-limit",
+        type=int,
+        default=None,
+        help="Optional: only scan the first N threads (useful for testing; do not use for real initial scrape)",
+    )
     args = parser.parse_args()
 
-    config = Config.from_env()
-    result = run_scrape(config=config, run_type=args.run_type)
+    config = Config.from_env(require_supabase=not args.dry_run)
+    result = run_scrape(
+        config=config, run_type=args.run_type, dry_run=bool(args.dry_run), thread_limit=args.thread_limit
+    )
 
     if result.status != "success":
         sys.stderr.write(result.error_message or "Unknown failure\n")
