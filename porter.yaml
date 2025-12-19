@@ -10,8 +10,8 @@ services:
     cron: 0 6,18 * * *
     timeoutSeconds: 10800
 build:
-  context: ./
+  context: .
   method: docker
-  dockerfile: Dockerfile
+  dockerfile: ./Dockerfile
 
 
