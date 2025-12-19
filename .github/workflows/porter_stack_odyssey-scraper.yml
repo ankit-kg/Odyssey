@@ -29,6 +29,9 @@ jobs:
             echo "Missing GitHub Actions secret: PORTER_APP_15256_4717"
             exit 1
           fi
+          # Some Porter CLI builds require an explicit login step in CI.
+          porter auth login --host "${PORTER_HOST}" --token "${PORTER_TOKEN}"
+
           # Pass auth + target flags explicitly so the CLI doesn't need an interactive login.
           exec porter \
             --host "${PORTER_HOST}" \
