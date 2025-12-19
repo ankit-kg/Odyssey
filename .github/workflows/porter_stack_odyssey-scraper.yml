@@ -24,7 +24,18 @@ jobs:
 
       - name: Deploy stack
         timeout-minutes: 30
-        run: exec porter apply -f porter.yaml
+        run: |
+          if [ -z "${PORTER_TOKEN}" ]; then
+            echo "Missing GitHub Actions secret: PORTER_APP_15256_4717"
+            exit 1
+          fi
+          # Pass auth + target flags explicitly so the CLI doesn't need an interactive login.
+          exec porter \
+            --host "${PORTER_HOST}" \
+            --token "${PORTER_TOKEN}" \
+            --project "${PORTER_PROJECT}" \
+            --cluster "${PORTER_CLUSTER}" \
+            apply -f porter.yaml
         env:
           PORTER_CLUSTER: 4717
           PORTER_HOST: https://dashboard.porter.run
