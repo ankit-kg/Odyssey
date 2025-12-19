@@ -1,0 +1,17 @@
+version: v2
+name: odyssey-scraper
+services:
+  - name: web
+    run: python -m odyssey_scraper --run-type scheduled
+    type: job
+    cpuCores: 0.5
+    ramMegabytes: 1024
+    terminationGracePeriodSeconds: 30
+    cron: 0 6,18 * * *
+    timeoutSeconds: 10800
+build:
+  context: ./
+  method: docker
+  dockerfile: /Dockerfile
+
+
