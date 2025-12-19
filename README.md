@@ -22,6 +22,7 @@ Purpose: **data collection only**. This project collects all historical + ongoin
 Run the SQL in:
 
 - `supabase/migrations/001_odyssey_schema.sql`
+- `supabase/migrations/002_odyssey_rls.sql` (enables RLS + locks down access)
 
 ## Environment variables
 
