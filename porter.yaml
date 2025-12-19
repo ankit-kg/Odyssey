@@ -12,6 +12,6 @@ services:
 build:
   context: ./
   method: docker
-  dockerfile: /Dockerfile
+  dockerfile: Dockerfile
 
 
