@@ -23,6 +23,7 @@ Run the SQL in:
 
 - `supabase/migrations/001_odyssey_schema.sql`
 - `supabase/migrations/002_odyssey_rls.sql` (enables RLS + locks down access)
+- `supabase/migrations/003_odyssey_refresh_latest_version.sql` (helper function for fast pointer refresh)
 
 ## Environment variables
 

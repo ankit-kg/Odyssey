@@ -5,6 +5,8 @@ from typing import Any, Iterable
 
 import praw
 import prawcore
+import threading
+import time
 
 from .config import Config
 from .util import ensure_jsonable_dict, from_utc_timestamp, to_iso, utc_now, with_retry_once
@@ -99,26 +101,51 @@ def fetch_thread_comments(submission: praw.models.Submission) -> list[ScrapedCom
     """
 
     def do_fetch() -> list[ScrapedComment]:
-        # Fully expand the comment tree. On large threads this can take a long time,
-        # so we do it in chunks and print progress to avoid appearing "stuck".
-        api_requests = 0
-        while True:
-            remaining = submission.comments.replace_more(limit=50, threshold=0)
-            api_requests += 50
-            if not remaining:
-                break
-            print(
-                f"    expanding_morecomments: remaining_batches≈{len(remaining)} api_requests_so_far≈{api_requests}",
-                flush=True,
-            )
-        all_comments = submission.comments.list()
+        # Always work with a fresh Submission instance for this thread. This prevents
+        # PRAW's DuplicateReplaceException in cases where replace_more partially mutates
+        # internal state and we retry.
+        fresh = submission._reddit.submission(id=submission.id)  # type: ignore[attr-defined]
+
+        # IMPORTANT:
+        # Do NOT call replace_more() with a small limit in a loop.
+        # PRAW's implementation will "skip and remove" remaining MoreComments once the limit is hit,
+        # which drops comments and causes under-counting.
+        #
+        # Expand in a single call with a very high limit so we don't hit the limit (which would
+        # cause PRAW to drop remaining MoreComments).
+        #
+        # We keep a heartbeat that DOES NOT touch PRAW internals, only prints liveness.
+        try:
+            mc = fresh.comments._gather_more_comments(fresh.comments._comments)  # type: ignore[attr-defined]
+            if mc is not None:
+                print(f"    expanding_morecomments: initial≈{len(mc)}", flush=True)
+        except Exception:
+            pass
+
+        stop = threading.Event()
+        start = time.monotonic()
+
+        def heartbeat() -> None:
+            while not stop.is_set():
+                elapsed_s = int(time.monotonic() - start)
+                print(f"    expanding_morecomments: still working... elapsed={elapsed_s}s", flush=True)
+                stop.wait(30)
+
+        t = threading.Thread(target=heartbeat, daemon=True)
+        t.start()
+        try:
+            fresh.comments.replace_more(limit=100000, threshold=0)
+        finally:
+            stop.set()
+            t.join(timeout=1)
+        all_comments = fresh.comments.list()
 
         out: list[ScrapedComment] = []
         for c in all_comments:
             if not isinstance(c, praw.models.Comment):
                 continue
 
-            _, thread_id = _normalize_fullname(getattr(c, "link_id", f"t3_{submission.id}"))
+            _, thread_id = _normalize_fullname(getattr(c, "link_id", f"t3_{fresh.id}"))
             parent_kind, parent_id = _normalize_fullname(getattr(c, "parent_id", ""))
             parent_comment_id = parent_id if parent_kind == "t1" else None
 
@@ -174,6 +201,7 @@ def fetch_thread_comments(submission: praw.models.Submission) -> list[ScrapedCom
             )
         return out
 
+    # Retry once (required behavior). Each attempt uses a fresh Submission object.
     return with_retry_once(lambda: _praw_guard(do_fetch))
 
 

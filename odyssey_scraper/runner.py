@@ -13,7 +13,6 @@ from .supabase_store import (
     insert_log,
     insert_versions,
     mark_versions_not_latest,
-    update_comments_latest_version,
     upsert_comments_metadata,
 )
 from .util import utc_now
@@ -161,11 +160,9 @@ def run_scrape(*, config, run_type: str, dry_run: bool = False, thread_limit: in
         inserted = insert_versions(sb, to_insert_versions)
 
         # 5) Update latest_version_id pointers
-        print(f"Updating latest_version_id pointers: {len(inserted)}", flush=True)
-        latest_updates = [
-            {"comment_id": row["comment_id"], "latest_version_id": row["version_id"]} for row in inserted
-        ]
-        update_comments_latest_version(sb, latest_updates)
+        if inserted or to_demote_version_ids:
+            print("Refreshing latest_version_id pointers in DB (SQL function)", flush=True)
+            sb.rpc("odyssey_refresh_latest_version_ids", {}).execute()
 
         insert_log(
             sb,
